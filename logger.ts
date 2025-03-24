@@ -1,5 +1,5 @@
 import { isatty } from "node:tty";
-import { addColors, config, createLogger, format, transports as wtransports } from "winston";
+import winston, { addColors, config, createLogger, format, transports as wtransports } from "winston";
 
 const myFormat = format.printf(({ level, message, timestamp }) => {
   return `${timestamp} [${level}] ${message}`;
@@ -9,7 +9,7 @@ const transports = {
   console: new wtransports.Console(),
 };
 
-export let logger = undefined;
+export let logger: winston.Logger = undefined;
 
 export const buildLogger = (level: string, colorize: boolean | undefined) => {
   let use_color = colorize === undefined ? isatty(1) : colorize;

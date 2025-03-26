@@ -92,12 +92,53 @@ export const discoverDevices = (discovery_ips: string[]): EventEmitter => {
         sock.close();
     });
 
-    ee.on("discover", (rinfo: RemoteInfo, dev: DevSerial) => {
+    ee.on("discover", async (rinfo: RemoteInfo, dev: DevSerial) => {
         if (devicesDiscovered[dev.devId]) {
             logger.info(`Camera ${dev.devId} at ${rinfo.address} already discovered, ignoring`);
         } else {
             devicesDiscovered[dev.devId] = true;
             logger.info(`Discovered new camera: ${dev.devId} at ${rinfo.address}`);
+            logger.info('To use this camera in Home Assistant, add MJPEG Camera integration with the following settings:');
+            logger.info(`MJPEG URL:       http://localhost:5000/camera/${dev.devId}`);
+            logger.info(`Still Image URL: http://localhost:5000/camera/${dev.devId}`);
+            logger.info('Username:        (leave blank)');
+            logger.info('Password:        (leave blank)');
+            logger.info('Verify SSL:      No');
+            // Create an MJPEG IP Camera entity in Home Assistant
+            const entityId = `camera.${dev.devId}`;
+            const cameraState = {
+                state: "idle",
+                unique_id: dev.devId,
+                attributes: {
+                    // unique_id: dev.devId,
+                    friendly_name: `Camera ${dev.devId}`,
+                    mjpeg_url: `http://localhost:5000/camera/${dev.devId}`,
+                    still_image_url: `http://localhost:5000/camera/${dev.devId}`,
+                    username: "",
+                    password: "",
+                    verify_ssl: false,
+                },
+            };
+    
+            try {
+                const response = await fetch(`http://supervisor/core/api/states/${entityId}`, {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${process.env.SUPERVISOR_TOKEN}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(cameraState),
+                });
+    
+                if (response.ok) {
+                    logger.info(`Successfully created entity: ${entityId}`);
+                } else {
+                    const error = await response.text();
+                    logger.error(`Failed to create entity: ${entityId}. Error: ${error}`);
+                }
+            } catch (err) {
+                logger.error(`Error creating entity: ${entityId}. ${err.message}`);
+            }
         }
     });
 

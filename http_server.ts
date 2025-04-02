@@ -141,6 +141,7 @@ export const serveHttp = (port: number) => {
       res.end(JSON.stringify({ message: "Discovery started for 10 seconds." }));
       return;
     } else {
+      res.writeHead(200, { "Content-Type": "text/html" });
       res.write("<html>");
       res.write("<head>");
       res.write(`<link rel="shortcut icon" href="/favicon.ico">`);

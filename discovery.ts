@@ -2,104 +2,153 @@ import { createSocket, RemoteInfo } from "node:dgram";
 import EventEmitter from "node:events";
 
 import { Commands } from "./datatypes.js";
-import { create_LanSearch, parse_PunchPkt } from "./impl.js";
+import { create_LanSearch, parse_PunchPkt, DevSerial } from "./impl.js"; // Ensure DevSerial is exported from impl
 import { logger } from "./logger.js";
-import { config } from "./settings.js";
-import { DevSerial } from "./impl.js";
+import { config } from "./settings.js"; // Keep for blacklisted_ips
 
+// Function to parse incoming discovery responses
 const handleIncomingPunch = (msg: Buffer, ee: EventEmitter, rinfo: RemoteInfo) => {
     const ab = new Uint8Array(msg).buffer;
     const dv = new DataView(ab);
     const cmd_id = dv.readU16();
-    if (cmd_id != Commands.PunchPkt) {
+
+    if (cmd_id !== Commands.PunchPkt) {
+        return; // Ignore non-PunchPkt messages
+    }
+
+    if (config.blacklisted_ips.includes(rinfo.address)) {
+        logger.debug(`Dropping PunchPkt from blacklisted IP: ${rinfo.address}`);
         return;
     }
-    if (config.blacklisted_ips.indexOf(rinfo.address) !== -1) {
-        logger.debug(`Dropping packet of blacklisted IP: ${rinfo.address}`);
-        return;
+
+    try {
+        const dev = parse_PunchPkt(dv);
+        logger.debug(`Received PunchPkt from ${dev.devId} at ${rinfo.address}`);
+        // Emit the raw discovery event with RemoteInfo and DevSerial
+        ee.emit("discover", rinfo, dev);
+    } catch (parseError) {
+         logger.error(`Error parsing PunchPkt from ${rinfo.address}: ${parseError.message}`);
     }
-    logger.debug("Received a PunchPkt message");
-    ee.emit("discover", rinfo, parse_PunchPkt(dv));
 };
 
+/**
+ * Starts the UDP device discovery process.
+ * @param discovery_ips Array of broadcast/multicast addresses to send discovery packets to.
+ * @returns EventEmitter that emits 'discover' (rinfo, dev), 'close', and 'error' events.
+ */
 export const discoverDevices = (discovery_ips: string[]): EventEmitter => {
-    const sock = createSocket("udp4");
-    const SEND_PORT = 32108;
     const ee = new EventEmitter();
-    let devicesDiscovered: Record<string, boolean> = {}; // Track discovered devices
-    let discoveryRunning = true; // Flag to control discovery
-    let discoveryInterval: NodeJS.Timeout | null = null; // Store the interval ID
-    let discoveryTimeout: NodeJS.Timeout | null = null; // Timeout to stop discovery after 10 seconds
+    const SEND_PORT = 32108; // Port to send discovery packets to
+    let sock: import("dgram").Socket | null = null;
+    let discoveryRunning = true;
+    let discoveryInterval: NodeJS.Timeout | null = null;
+    let discoveryTimeout: NodeJS.Timeout | null = null;
 
-    sock.on("error", (err) => {
-        console.error(`sock error:\n${err.stack}`);
-        sock.close();
-    });
+    try {
+         sock = createSocket("udp4");
 
-    sock.on("message", (msg, rinfo) => handleIncomingPunch(msg, ee, rinfo));
+         sock.on("error", (err) => {
+            logger.error(`UDP discovery socket error:\n${err.stack}`);
+            ee.emit("error", err); // Emit error event
+            cleanup(); // Attempt cleanup on error
+         });
 
-    sock.on("listening", () => {
-        let ls_buf = create_LanSearch();
-        sock.setBroadcast(true);
+         sock.on("message", (msg, rinfo) => {
+             // Rate limiting could be added here if needed
+             handleIncomingPunch(msg, ee, rinfo);
+         });
 
-        const sendLanSearch = () => {
-            if (!discoveryRunning) {
-                return; // Stop if discovery is no longer running
+         sock.on("listening", () => {
+            const listenAddress = sock!.address();
+            logger.info(`UDP Discovery socket listening on ${listenAddress.address}:${listenAddress.port}`);
+            const ls_buf = create_LanSearch();
+            try {
+                sock!.setBroadcast(true);
+            } catch (err) {
+                logger.error(`Failed to set broadcast on discovery socket: ${err.message}`);
+                // Continue anyway, might work on some networks/OSes
             }
-            discovery_ips.forEach((discovery_ip) => {
-                logger.log("trace", `>> LanSearch [${discovery_ip}]`);
-                sock.send(new Uint8Array(ls_buf.buffer), SEND_PORT, discovery_ip);
-            });
-        };
 
-        discovery_ips.forEach((discovery_ip) => {
-            logger.info(`Searching for devices on ${discovery_ip}`);
-        });
+            const sendLanSearch = () => {
+                if (!discoveryRunning || !sock) return;
+                const sendBuffer = new Uint8Array(ls_buf.buffer);
+                discovery_ips.forEach((discovery_ip) => {
+                    logger.debug(`>> Sending LanSearch to [${discovery_ip}:${SEND_PORT}]`);
+                    sock!.send(sendBuffer, SEND_PORT, discovery_ip, (err) => {
+                        if (err) logger.error(`Error sending LanSearch to ${discovery_ip}: ${err.message}`);
+                    });
+                });
+            };
 
-        discoveryInterval = setInterval(sendLanSearch, 3000);
-        sendLanSearch(); // Send the first LanSearch immediately
+            logger.info(`Starting UDP discovery search on ${discovery_ips.join(', ')}...`);
+            discoveryInterval = setInterval(sendLanSearch, 3000); // Send every 3 seconds
+            sendLanSearch(); // Send immediately
 
-        // Stop discovery after 10 seconds
-        discoveryTimeout = setTimeout(() => {
-            discoveryRunning = false;
-            if (discoveryInterval) {
-                clearInterval(discoveryInterval);
-            }
-            sock.close();
-            logger.info("Discovery process stopped after 10 seconds.");
-        }, 10000);
-    });
+            // Set timeout for the discovery duration
+            discoveryTimeout = setTimeout(() => {
+                logger.info("Discovery process timeout reached (10 seconds). Stopping UDP search.");
+                cleanup(); // Cleanup stops sending and closes socket
+            }, 10000); // Runs for 10 seconds total
+         });
 
-    sock.bind();
+         // Bind to listen for responses
+         sock.bind(undefined, "0.0.0.0", () => {
+             logger.debug("UDP Discovery socket bound successfully.");
+         });
 
-    sock.on("close", () => {
-        if (discoveryInterval) {
-            clearInterval(discoveryInterval);
-        }
-        if (discoveryTimeout) {
-            clearTimeout(discoveryTimeout);
-        }
-    });
+    } catch (initError) {
+        logger.error(`Failed to initialize UDP discovery socket: ${initError.message}`);
+        ee.emit("error", initError);
+        return ee; // Return emitter, but it won't work
+    }
 
-    ee.on("close", () => {
+
+    const cleanup = () => {
+        if (!discoveryRunning) return; // Prevent multiple cleanups
         discoveryRunning = false;
-        if (discoveryInterval) {
-            clearInterval(discoveryInterval);
+        logger.debug("Cleaning up discovery resources...");
+
+        if (discoveryInterval) { clearInterval(discoveryInterval); discoveryInterval = null; }
+        if (discoveryTimeout) { clearTimeout(discoveryTimeout); discoveryTimeout = null; }
+
+        if (sock) {
+            try {
+                sock.close();
+                // The 'close' event handler below will log the closure
+            } catch (closeErr) {
+                logger.info(`Error closing UDP discovery socket during cleanup: ${closeErr.message}`);
+                sock = null; // Ensure sock is nullified
+                ee.emit("close"); // Manually emit close if close throws error
+            }
+        } else {
+             ee.emit("close"); // Emit close if socket wasn't even created/bound
         }
-        if (discoveryTimeout) {
-            clearTimeout(discoveryTimeout);
-        }
-        sock.close();
+    };
+
+    // Handle socket close event
+    sock.on("close", () => {
+        logger.info("UDP Discovery socket closed.");
+        sock = null; // Nullify the socket variable
+        // Ensure timers are cleared if close happens unexpectedly
+        if (discoveryInterval) clearInterval(discoveryInterval); discoveryInterval = null;
+        if (discoveryTimeout) clearTimeout(discoveryTimeout); discoveryTimeout = null;
+        discoveryRunning = false; // Ensure running flag is false
+        ee.emit("close"); // Emit the close event for listeners
     });
 
-    ee.on("discover", (rinfo: RemoteInfo, dev: DevSerial) => {
-        if (devicesDiscovered[dev.devId]) {
-            logger.info(`Camera ${dev.devId} at ${rinfo.address} already discovered, ignoring`);
-        } else {
-            devicesDiscovered[dev.devId] = true;
-            logger.info(`Discovered new camera: ${dev.devId} at ${rinfo.address}`);
-        }
+    // Allow external stop command via the emitter
+    ee.on("stop", () => {
+        logger.info("Received external stop signal for discovery.");
+        cleanup();
     });
 
     return ee;
+};
+
+/**
+ * Sends a stop signal to a running discovery emitter.
+ * @param ee The EventEmitter returned by discoverDevices.
+ */
+export const stopDiscovery = (ee: EventEmitter) => {
+    ee.emit("stop");
 };

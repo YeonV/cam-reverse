@@ -11,6 +11,7 @@ import { buildLogger, logger } from "../logger.js";
 
 const majorVersion = process.versions.node.split(".").map(Number)[0];
 
+
 yargs(hideBin(process.argv))
   .command(
     "http_server",
@@ -28,12 +29,11 @@ yargs(hideBin(process.argv))
         .strict();
     },
     (argv) => {
+      const uiPort = parseInt((process.env.ADDON_UI_PORT || argv.port || 5000).toString(), 10);
       if (argv.config_file !== undefined) {
         loadConfig(argv.config_file);
       }
-      if (argv.port) {
-        config.http_server.port = argv.port;
-      }
+      config.http_server.port = uiPort;
       if (argv.color !== undefined) {
         config.logging.use_color = argv.color;
       }

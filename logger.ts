@@ -11,7 +11,7 @@ const transports = {
 
 export let logger: winston.Logger = undefined;
 
-export const buildLogger = (level: string, colorize: boolean | undefined) => {
+export const buildLogger = (level: string = process.env.ADDON_LOG_LEVEL || "info", colorize: boolean | undefined) => {
   let use_color = colorize === undefined ? isatty(1) : colorize;
   const fmt = use_color
     ? format.combine(format.colorize(), format.timestamp(), myFormat)

@@ -31,15 +31,26 @@ export const handle_P2PRdy = (session: Session, _: DataView) => {
 };
 
 export const makeP2pRdy = (dev: DevSerial): DataView => {
-  const outbuf = new DataView(new Uint8Array(0x14).buffer); // 8 = serial u64
-  // The protocol seems to expect 4 bytes -- check the regression test
-  // `replies properly to PunchPkt with 3-letters-long prefix` for a case with a
-  // real device
-  const devPrefixLength = 4;
-  outbuf.add(0).writeString(dev.prefix);
-  outbuf.add(4).writeU64(dev.serialU64);
-  outbuf.add(8 + devPrefixLength).writeString(dev.suffix);
-  return create_P2pRdy(outbuf);
+  const P2PRDY_PAYLOAD_SIZE = 0x14; // 20 bytes expected by create_P2pRdy
+  const outbufView = new DataView(new Uint8Array(P2PRDY_PAYLOAD_SIZE).buffer);
+
+  // Prefix (always 4 bytes as confirmed by parse_PunchPkt)
+  outbufView.add(0).writeString(dev.prefix); // Assuming writeString stops at 4 bytes or dev.prefix is guaranteed 4
+
+  // Serial (8 bytes)
+  outbufView.add(4).writeU64(dev.serialU64); // Starts at offset 4
+
+  // Suffix (Needs to fill the remaining 8 bytes exactly)
+  const suffixTargetLength = 8;
+  const suffixBuffer = Buffer.from(dev.suffix); // Get suffix as buffer
+  const finalSuffixBuffer = Buffer.alloc(suffixTargetLength); // Create 8-byte buffer (zero-filled)
+  // Copy from original suffix, up to 8 bytes, starting at index 0 in both buffers
+  suffixBuffer.copy(finalSuffixBuffer, 0, 0, Math.min(suffixBuffer.length, suffixTargetLength));
+
+  outbufView.add(12).writeByteArray(finalSuffixBuffer); // Write the 8-byte padded/truncated buffer
+
+  // Pass the now correctly formatted 20-byte payload view
+  return create_P2pRdy(outbufView);
 };
 
 export const swVerToString = (swver: number): string => {
@@ -146,9 +157,38 @@ export const createResponseForControlCommand = (session: Session, dv: DataView):
     case ControlCommands.VideoParamSetAck:
       logger.debug("Video param set ack");
       return [];
+    case 0xff50:
+      // This command appears periodically with a fixed payload.
+      // Likely a keep-alive or generic status for the control channel.
+      // No action or response seems required based on observation.
+      logger.debug(`Received known periodic command 0x${cmd_id.toString(16)}, ignoring.`);
+      // Log payload only if needed for deep debugging:
+      // try { /* payload logging code from previous default case */ } catch(e) {}
+      return []; // Return empty array, no response needed
+    // --- End Add Case ---
+
     default:
+      // Keep the default case for truly *unknown* commands
       logger.info(`Unhandled control command: 0x${cmd_id.toString(16)}`);
+      try {
+        // (Payload logging code from previous response can stay here if desired
+        //  for future unknown commands)
+        const dataOffset = 20;
+        const encryptedPayloadLen = payload_len - 4;
+        if (encryptedPayloadLen > 0 && (dataOffset + encryptedPayloadLen) <= dv.byteLength) {
+            // ... (Payload logging logic) ...
+            logger.info(` -> Default Handler Payload (Hex): ...`);
+        } else if (encryptedPayloadLen <= 0) {
+            logger.info(` -> Command 0x${cmd_id.toString(16)} has no payload data.`);
+        } else {
+            logger.warning(` -> Invalid payload length for unhandled command 0x${cmd_id.toString(16)}.`);
+        }
+      } catch (e) {
+        logger.error(` -> Error processing payload for unhandled command 0x${cmd_id.toString(16)}: ${e.message}`);
+      }
+      break; // Break for default case
   }
+  // Fallback if break is missed or no case matches explicitly (shouldn't happen with break)
   return [];
 };
 

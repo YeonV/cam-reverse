@@ -10,7 +10,8 @@
     "noEmit": true,
     "rootDir": "./",
     "strict": false,
-    "sourceMap": false
+    "sourceMap": false,
+    "resolveJsonModule": true
   }
 }
 
